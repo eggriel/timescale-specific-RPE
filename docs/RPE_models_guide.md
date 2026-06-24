@@ -10,6 +10,174 @@ This guide covers five major computational models of dopaminergic prediction err
 
 ---
 
+## −1. Foundations: Building Blocks from Scratch
+
+This section builds every concept used in the rest of the guide from first principles, assuming no prior RL knowledge. If you are already comfortable with value functions and linear function approximation, skip to Section 0.
+
+### −1.1 What is a Reward?
+
+A **reward** $r_t$ is a scalar number the environment hands to the agent at each moment. It encodes how good that moment was: positive for desirable outcomes (finding food, completing a trial), negative or zero for neutral/bad outcomes.
+
+In the Parker task: $r_t = 1$ if the chosen lever delivers reward, $r_t = 0$ otherwise.
+In the grid world: $r_t = 1$ upon reaching the goal, $r_t = 0$ everywhere else.
+
+Critically, reward is **not** the thing we want the agent to maximise at a single instant — an agent that only cares about right-now reward would eat a poisonous berry because it tastes sweet. The agent must care about the **sum of future rewards**.
+
+### −1.2 The Return $G_t$: Why We Need a Sum Over the Future
+
+The **return** $G_t$ is the total reward the agent will collect from time $t$ onwards:
+
+$$G_t = r_t + r_{t+1} + r_{t+2} + \cdots$$
+
+But a problem arises: in most tasks, episodes can be indefinitely long, so this sum might be infinite. We fix this by **discounting** — future rewards count less. The discounted return is:
+
+$$G_t = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \cdots = \sum_{k=0}^{\infty} \gamma^k r_{t+k}$$
+
+The **discount factor** $\gamma \in [0, 1)$ controls how much future rewards are down-weighted:
+- $\gamma = 0$: agent is completely myopic — only the immediate reward matters.
+- $\gamma \to 1$: agent values distant future nearly as much as the present.
+- $\gamma = 0.95$ (typical): a reward 10 steps away is worth $0.95^{10} \approx 0.60$ of its face value.
+
+**Why is $G_t$ recursive?** Notice that $G_t = r_t + \gamma G_{t+1}$. The return from now equals the immediate reward plus the discounted return from the next step. This recursive structure is the key algebraic trick that makes TD learning possible.
+
+### −1.3 The Value Function $V(s)$: What is a State Worth?
+
+The **value function** $V(s)$ answers: *"If I am in state $s$ right now, how much total future reward should I expect?"*
+
+Formally:
+$$V(s) = \mathbb{E}[G_t \mid s_t = s]$$
+
+The expectation $\mathbb{E}[\cdot]$ is over randomness in the environment (which transitions occur, whether reward is delivered stochastically) and in the agent's own policy (which actions it tends to take).
+
+**Intuitive examples:**
+
+In a linear track where reward is at the end:
+
+| State | Distance from reward | $V(s)$ (approx, $\gamma=0.9$) |
+|---|---|---|
+| 1 step away | 1 | $0.9 \times 1 = 0.90$ |
+| 2 steps away | 2 | $0.9^2 \times 1 = 0.81$ |
+| 5 steps away | 5 | $0.9^5 \times 1 = 0.59$ |
+| Start | 10 | $0.9^{10} \times 1 = 0.35$ |
+
+The value is high near the goal and low far away. This **gradient** in value is what guides the agent: move to higher-value states.
+
+**The Bellman consistency equation** (the core identity from which everything follows):
+
+$$V(s) = \mathbb{E}[r_t + \gamma V(s_{t+1}) \mid s_t = s]$$
+
+In words: the value of being here equals the expected immediate reward plus the discounted value of wherever I end up next. Any function $V$ that satisfies this for all states is the true value function. This is not a definition — it is a constraint that uniquely determines $V$.
+
+### −1.4 Features $\vec{\phi}(s)$: How to Represent State
+
+A **state** $s$ is whatever the agent can observe. In a grid world, $s = (row, col)$. In a mouse experiment, $s$ might be the visual scene, the animal's position and speed, or its current evidence for left vs. right.
+
+A **feature** $\phi_j(s)$ is a scalar function that maps a state to a number. Features capture properties of the state that are useful for predicting value:
+- "How far am I from the goal?" → distance feature
+- "Am I at position $(3,4)$?" → indicator feature
+- "How many left-side cues have I seen so far?" → evidence feature
+
+The **feature vector** $\vec{\phi}(s) = [\phi_1(s), \phi_2(s), \ldots, \phi_n(s)]^T$ collects all features into a column vector. Each component $\phi_j(s)$ activates to a different degree depending on the current state.
+
+**Three common feature types:**
+
+**One-hot (tabular):** $\phi_j(s) = 1$ if $s = s_j$, else $0$. One feature fires exclusively for each state. This represents the state exactly but doesn't generalise across similar states.
+
+$$\vec{\phi}((2,3)) = [0, 0, \ldots, 1, \ldots, 0] \quad \text{(only the entry for state (2,3) is 1)}$$
+
+**Gaussian place fields (RBF):** $\phi_j(s) = \exp\!\left(-\frac{\|s - c_j\|^2}{2\sigma^2}\right)$. Feature $j$ fires maximally when $s$ is near centre $c_j$ and tapers off with distance. This generalises: nearby states activate nearby features.
+
+**Distance/direction features:** $\phi_j(s)$ = (normalised distance from $s$ to candidate goal $j$). These encode task-relevant geometry.
+
+The choice of features determines what structure the agent can learn. Good features make value a smooth, learnable function; bad features (or too few) make it unlearnable.
+
+### −1.5 The Weight Vector $\vec{w}$: What is Learned
+
+We want to learn $V(s)$, but we cannot store a separate number for every possible state (there are too many, or states are continuous). Instead, we **parameterise** the value function as a **linear combination** of features:
+
+$$V(s) \approx \vec{w} \cdot \vec{\phi}(s) = \sum_j w_j \, \phi_j(s)$$
+
+The **weight vector** $\vec{w} = [w_1, w_2, \ldots, w_n]^T$ is what the agent learns. Each weight $w_j$ encodes: "feature $j$ being active is associated with this much future value."
+
+**Intuition for learned weights:**
+
+Suppose we have distance-to-goal features. After learning:
+- $w_j > 0$ if feature $j$ fires in states that tend to lead to reward (being close to the goal).
+- $w_j < 0$ if feature $j$ fires in states that tend to lead to punishment.
+- $w_j \approx 0$ if feature $j$ is irrelevant to value.
+
+**Why linear?** Linearity is not a severe restriction: the features themselves can be nonlinear (exponentials, sigmoids, outputs of a neural network). We are only linear in the *final combination step*. This is the standard setup in both deep RL (features = penultimate layer of a network) and tabular RL (features = one-hot vectors, so weights = a lookup table).
+
+### −1.6 The TD Error $\delta_t$: The Prediction Error Signal
+
+Given the Bellman equation, we know the true value function satisfies:
+$$V(s_t) = r_t + \gamma V(s_{t+1})$$
+
+But our current estimate $V(s_t) = \vec{w} \cdot \vec{\phi}(s_t)$ may not satisfy this. The **TD error** measures how wrong our current prediction is:
+
+$$\delta_t = \underbrace{r_t + \gamma V(s_{t+1})}_{\text{Bellman target}} - \underbrace{V(s_t)}_{\text{current prediction}}$$
+
+The Bellman target $r_t + \gamma V(s_{t+1})$ is a better estimate of the true value than $V(s_t)$ alone, because it uses one step of actual experience ($r_t$) plus a bootstrapped estimate of the future ($\gamma V(s_{t+1})$). We call it a "target" because we want $V(s_t)$ to move towards it.
+
+**Sign interpretation:**
+- $\delta_t > 0$: outcome was better than predicted → update $V(s_t)$ upward.
+- $\delta_t < 0$: outcome was worse than predicted → update $V(s_t)$ downward.
+- $\delta_t = 0$: prediction was exactly right → no update needed.
+
+This is exactly what DA neurons do: burst for better-than-expected, dip for worse-than-expected, and stay silent when perfectly predicted.
+
+### −1.7 Why is the Loss $\frac{1}{2}({\rm target} - {\rm prediction})^2$?
+
+We want to find weights $\vec{w}$ such that $V(s) = \vec{w} \cdot \vec{\phi}(s)$ is as close as possible to the Bellman target $r_t + \gamma V(s_{t+1})$. A natural measure of "close" is the **mean squared error**:
+
+$$\mathcal{L}(\vec{w}) = \frac{1}{2}\left[(r_t + \gamma V(s_{t+1})) - V(s_t)\right]^2 = \frac{1}{2} \delta_t^2$$
+
+**Why squared?** Several reasons:
+1. Squaring makes the loss always non-negative (we can't have negative error).
+2. It penalises large errors much more than small ones (a $2\times$ bigger error gives $4\times$ the loss), encouraging the agent to eliminate large mistakes first.
+3. The squared function is smooth and differentiable, enabling gradient-based learning.
+
+**Why the $\frac{1}{2}$?** This is purely for mathematical convenience. When we take the derivative:
+
+$$\frac{\partial \mathcal{L}}{\partial \vec{w}} = \frac{\partial}{\partial \vec{w}} \left[\frac{1}{2} \delta_t^2\right] = \delta_t \cdot \frac{\partial \delta_t}{\partial \vec{w}} = \delta_t \cdot (-\vec{\phi}(s_t)) = -\delta_t \vec{\phi}(s_t)$$
+
+The $\frac{1}{2}$ cancels the $2$ that comes from differentiating the square: $\frac{d}{dx}\frac{1}{2}x^2 = x$. Without the $\frac{1}{2}$, the gradient would be $-2\delta_t \vec{\phi}(s_t)$, which would just mean the effective learning rate is halved. The $\frac{1}{2}$ is **not conceptually important** — it just keeps the math cleaner.
+
+### −1.8 The Weight Update: Gradient Descent
+
+To minimise $\mathcal{L}$, we move weights in the direction that decreases the loss — the negative gradient:
+
+$$\vec{w} \leftarrow \vec{w} - \alpha \frac{\partial \mathcal{L}}{\partial \vec{w}} = \vec{w} + \alpha \, \delta_t \, \vec{\phi}(s_t)$$
+
+where $\alpha > 0$ is the **learning rate** (step size). This says: shift each weight $w_j$ by $\alpha \cdot \delta_t \cdot \phi_j(s_t)$.
+
+**Why multiply by $\phi_j(s_t)$?** Because only features that were active when the error occurred should be updated. If $\phi_j(s_t) = 0$ (feature $j$ was silent), then $w_j$ played no role in generating $V(s_t)$, so we should not blame (or credit) it for the error. The product $\delta_t \cdot \phi_j(s_t)$ implements this: large update for features that were active and wrong; zero update for features that were silent.
+
+This is the biological version of **Hebbian learning** modulated by dopamine: the corticostriatal synapse $w_j$ is potentiated (LTP) when the presynaptic feature $\phi_j$ is active ($\phi_j > 0$) at the same time as a positive DA signal ($\delta_t > 0$), and depressed (LTD) when $\phi_j$ is active during a negative DA signal ($\delta_t < 0$).
+
+**Important caveat (the "semi-gradient" trick):** When computing the gradient, we treat the Bellman target $r_t + \gamma V(s_{t+1})$ as a **fixed constant** — we do not differentiate through $V(s_{t+1})$ with respect to $\vec{w}$. This is the "semi-gradient" because it ignores part of the true gradient. It is necessary for stability: the fully correct gradient would require differentiating the target, creating a moving-target problem that destabilises learning.
+
+### −1.9 Summary: The Complete Learning Loop
+
+Putting it all together, one step of TD learning:
+
+```
+Observe state s_t → compute φ(s_t)
+Compute prediction:  V(s_t) = w · φ(s_t)
+Take action, receive r_t, observe s_{t+1}
+Compute Bellman target:  target = r_t + γ · (w · φ(s_{t+1}))
+Compute TD error:  δ_t = target - V(s_t)
+Update weights:  w ← w + α · δ_t · φ(s_t)
+```
+
+**The DA signal $\delta_t$ does two things at once:**
+1. It is the **teaching signal** — its sign and magnitude tell weights whether to grow or shrink.
+2. It is the **prediction error signal** — it encodes surprise, which is what phasic DA neurons empirically report.
+
+These are not separate functions; they are the same thing viewed computationally vs. biologically.
+
+---
+
 ## 0. Shared Framework and Notation
 
 ### The RL Problem
@@ -640,4 +808,337 @@ Visualize $V(s)$ across the grid at different learning stages. For the feature-s
 
 ---
 
-*This guide provides the mathematical foundations. Implementation details (code, simulation parameters, analysis pipelines) are addressed separately.*
+---
+
+## 10. Repository Code Guide: `ndawlab/vectorRPE` — APE Analysis
+
+This section documents the Python files in the `APE analysis/` folder of the Lee et al. repository. The folder implements the APE vs. RPE comparison shown in Figure 8 of the paper, using the Parker et al. reversal task and the Jin & Costa sequential-press task.
+
+### 10.1 `VectorRPEAgent.py` — The Feature-Specific RPE Agent
+
+This is the **core implementation** of the feature-specific RPE model (Lee et al. Eq. 1). It is misnamed relative to the paper's terminology: internally the paper calls it "vector RPE" because values and PEs are vectors, not because it does vectorised computation over different *outcomes*.
+
+**Class: `VectorRPEAgent`**
+
+```python
+class VectorRPEAgent(object):
+    def __init__(self, num_features, lr, gamma):
+        self.weights = np.zeros(num_features)  # w vector, one weight per feature
+```
+
+`weights` is the learned $\vec{w}$. Initialised to zero — the agent starts with zero value predictions everywhere.
+
+**`val(state_vec)`** — Value prediction
+```python
+def val(self, state_vec):
+    return np.dot(state_vec, self.weights)   # V(s) = w · φ(s)
+```
+This is $V(s) = \vec{w} \cdot \vec{\phi}(s)$. Takes a feature vector (not a raw state), returns a scalar.
+
+**`compute_delta_feat(state_vec, succ_vec, reward)`** — Per-channel prediction errors
+```python
+def compute_delta_feat(self, state_vec, succ_vec, reward):
+    delta_features = np.zeros(self.num_features)
+    for i in range(self.num_features):
+        delta_features[i] = reward / self.num_features          # r_t / N
+        delta_features[i] += self.weights[i] * (self.gamma * succ_vec[i] - state_vec[i])
+    return delta_features
+```
+This implements **Eq. 1** from Lee et al. exactly:
+$$\delta_{i,t} = \frac{r_t}{N} + w_i(\gamma \phi_{i,t+1} - \phi_{i,t})$$
+The output is a vector of length `num_features` — one PE per channel. These are the "DA signals" used in all figures.
+
+**`compute_delta(state_vec, succ_vec, reward)`** — Scalar (total) PE
+```python
+def compute_delta(self, state_vec, succ_vec, reward):
+    return np.sum(self.compute_delta_feat(state_vec, succ_vec, reward))
+```
+Just sums the per-channel PEs: $\delta_{\text{total}} = \sum_i \delta_{i,t}$. By the conservation identity, this equals the standard scalar RPE.
+
+**`learn(state_vec, succ_vec, reward, ret_da=True)`** — Update and optionally return DA signals
+```python
+def learn(self, state_vec, succ_vec, reward, ret_da=True):
+    delta_feat = self.compute_delta_feat(state_vec, succ_vec, reward)
+    delta = np.sum(delta_feat)                   # scalar total RPE
+    self.weights += self.alpha * delta * state_vec  # ← KEY: uses SCALAR delta, not delta_feat!
+    if ret_da:
+        return delta_feat
+```
+
+**Critical design choice**: The weight update uses `delta` (the scalar total RPE), **not** `delta_feat[i]`. This means:
+
+$$w_j \leftarrow w_j + \alpha \cdot \delta_{\text{total}} \cdot \phi_j(s_t)$$
+
+This is the **global** update rule (Option 2 from Section 6), not the local feature-specific one. The feature-specific PEs `delta_feat` are returned purely for **post-hoc neural analysis** — they are what you use to plot "what the DA signal looks like," but they are not used for learning.
+
+This is consistent with the paper: the deep RL network in Lee et al. is trained with A2C (which uses the global scalar critic), and the feature-specific PEs are derived from the trained network, not used to train it.
+
+**The tabular demo** (in `if __name__ == '__main__'`):
+```python
+max_state = 5
+vrpe = VectorRPEAgent(max_state + 1, lr, gamma)  # 6 features = 6 states
+# One-hot features: phi(state) = [0,...,1,...,0]
+# Reward at state 5 only
+```
+After 10,000 trials through a linear chain, weights converge to the true value function: $w_j \approx \gamma^{5-j}$.
+
+---
+
+### 10.2 `ScalarRPEAgent.py` — The Classic Tabular RPE Agent
+
+This implements the **standard tabular TD(0)** model. States are integers; the value function is stored as a lookup table.
+
+**Class: `ScalarRPEAgent`**
+
+```python
+class ScalarRPEAgent(object):
+    def __init__(self, num_states, lr, gamma):
+        self.V = np.zeros(num_states)   # value table, one entry per state
+```
+
+`V` is the tabular value function — a plain array of floats.
+
+**`val(state)`**
+```python
+def val(self, state):
+    return self.V[state]   # direct lookup, no dot product needed
+```
+Takes an **integer** (not a feature vector). This is the key difference from `VectorRPEAgent`.
+
+**`compute_delta(state, succ, reward)`**
+```python
+def compute_delta(self, state, succ, reward):
+    return reward + self.gamma * self.V[succ] - self.V[state]
+```
+Standard $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$. Takes integer state indices.
+
+**`learn(state, succ, reward)`**
+```python
+def learn(self, state, succ, reward, ret_da=True):
+    delta = self.compute_delta(state, succ, reward)
+    self.V[state] += self.alpha * delta
+    return delta
+```
+Returns the **scalar** $\delta_t$, not a vector. This is the signal compared to `delta_feat` from `VectorRPEAgent`.
+
+**VectorRPE vs ScalarRPE: Key Differences**
+
+| Aspect | `VectorRPEAgent` | `ScalarRPEAgent` |
+|---|---|---|
+| Input type | Feature vector `state_vec` | Integer state `state` |
+| Value storage | Weights `w` (dot product) | Table `V` (lookup) |
+| DA output | Vector `delta_feat[i]` per channel | Scalar `delta` |
+| Learning signal | Scalar $\delta_{\rm total}$ × feature vector | Scalar $\delta$ |
+| Represents | Feature-specific RPE model | Classic RPE / tabular TD |
+| When to use | When features differ across channels | When states are discrete & enumerable |
+
+In the Parker task code, `ScalarRPEAgent` is used when you want one number per neuron type; `VectorRPEAgent` is used when you want per-channel DA signals to plot heat maps.
+
+---
+
+### 10.3 `parkerRPE.py` — Feature-Specific RPE on the Parker Task
+
+This script runs the **RPE version** of the Parker et al. reversal task: a two-armed bandit where one lever yields reward with probability 0.7, the other with 0.1, and these contingencies flip every 5,000 trials.
+
+**State space** (the key design):
+```python
+state 0: start (lever presentation)
+state 1: rewarded outcome
+state 2: unrewarded outcome
+states [3, 4, 5]: left press path (premotor → press → wait)
+states [6, 7, 8]: right press path
+```
+Total: 9 states. One-hot feature vectors → `num_features = 9`.
+
+The agent is a single `VectorRPEAgent` treating **reward** as the outcome:
+
+```python
+simple_agent = VectorRPEAgent(simple_features, lr, gamma)
+# gamma = 0.95, lr = 0.1
+```
+
+**Trial structure** (each trial):
+1. Start at state 0. Self-transitions with probability 0.8 (random ITI).
+2. Softmax action selection (left or right) based on value of left- vs. right-path states.
+3. Walk along the chosen action's state path (e.g., states [3, 4, 5] for left). DA signals computed at each step.
+4. At the final wait state: probabilistic transition to reward (state 1) or omission (state 2). The `reward` variable here is the actual biological reward.
+5. `simple_agent.learn(state, succ, reward)` at the transition to outcome state.
+
+**What is saved**: `da_simple` — a list of `delta_feat` vectors (one per time step per trial). This is the feature-specific RPE signal. Also saves `states`, `actions`, `rewards`, `epoch`.
+
+**Key difference from `parkerAPE.py`**: Here, the agent gets `reward = 1` or `reward = 0` at the outcome step. The RPE signal encodes surprise about the reward outcome.
+
+---
+
+### 10.4 `parkerAPE.py` — APE vs. RPE Comparison on the Parker Task
+
+This is the central comparison file. It runs **four agents simultaneously**:
+
+```python
+left_agent  = VectorRPEAgent(...)   # feature-specific APE, left-preferring
+right_agent = VectorRPEAgent(...)   # feature-specific APE, right-preferring
+left_scal_agent  = ScalarRPEAgent(...)  # scalar APE, left-preferring
+right_scal_agent = ScalarRPEAgent(...)  # scalar APE, right-preferring
+```
+
+**The APE "reward" signal — the crucial difference:**
+
+```python
+left_reward  = int(action == 0)   # 1 if left action was chosen, else 0
+right_reward = int(action == 1)   # 1 if right action was chosen, else 0
+```
+
+Action is chosen via softmax over **reward probabilities** (`bandit_probs`), NOT over action values. This means action selection is driven by reward expectations, but the APE agents learn to predict actions, not rewards.
+
+**At the action step** (step `i == 1` in the state path):
+```python
+trial_da_left.append(left_agent.learn(simple_state_rep, simple_succ_state_rep, left_reward))
+trial_da_right.append(right_agent.learn(simple_state_rep, simple_succ_state_rep, right_reward))
+```
+The APE agent gets `left_reward = 1` (or 0) — the indicator for whether its preferred action occurred.
+
+**At the outcome step** (reward/omission):
+```python
+trial_da_left.append(left_agent.learn(simple_state_rep, simple_succ_state_rep, 0))
+trial_da_right.append(right_agent.learn(simple_state_rep, simple_succ_state_rep, 0))
+```
+Both APE agents get `reward = 0` at outcome — **they do not care about biological reward**. This is the value-free property.
+
+**Parallelism with parkerRPE.py:**
+
+| | `parkerRPE.py` | `parkerAPE.py` |
+|---|---|---|
+| Outcome signal at reward step | `reward = 1` or `0` | `reward = 0` always |
+| Outcome signal at action step | `reward = 0` | `left_reward = I(action==left)` |
+| Number of agents | 1 (single RPE agent) | 4 (left/right × vector/scalar) |
+| `gamma` for action model | 0.95 | 0.5 (harsher — actions are short-horizon) |
+| What "value" tracks | Expected future reward | Expected future action frequency |
+
+The harsher gamma for APE ($\gamma=0.5$ vs $\gamma=0.95$) reflects the intuition that action prediction is a near-term computation (prepare the next action) whereas reward prediction integrates over the full future.
+
+**What is saved**: `da_left`, `da_right` (vector APE, per-channel), `scal_da_left`, `scal_da_right` (scalar APE, single number).
+
+---
+
+### 10.5 `simulate_session.py` — The Baiting Task Simulator
+
+This file implements a realistic simulation of the mouse **baiting task** — the eventual target for your custom β model. It is more complex than the Parker task, incorporating real-time structure (ms-scale timesteps) and stochastic timing.
+
+**`Session` class overview:**
+
+```python
+Session(T_max=150000, dt=50, baiting_probs=[0.15, 0.32, 0.48, 0.65])
+```
+- `T_max = 150,000` steps × `dt = 50 ms` = up to 125 minutes of simulated behavior.
+- `baiting_probs`: the four possible baseline reward probabilities per side. These are **baiting** probabilities — reward accumulates on a side when not chosen.
+
+**`set_baiting_prob_sequences()`** — Block design:
+
+Each block has a left and right probability drawn from the four levels. Constraints:
+- The higher-probability side cannot be the same for two consecutive non-equal blocks (prevents predictability).
+- Block length is determined so that ~25 rewarded trials occur per block on average, plus a random jitter (1–10 trials) to make block boundaries undetectable.
+
+The algorithm:
+1. Samples all $4 \times 4 = 16$ left/right probability combinations.
+2. Enforces the alternation constraint.
+3. Computes block length from reward-rate-weighted averaging of left and right n-trials.
+
+**`generate_random_actions()`** — Simulates mouse behavior:
+
+Actions are generated from a **random policy** (not RL-informed), matching the structure of mouse behavior:
+- Initiation times: exponential distribution (mean 2.5s) — the mouse pokes the centre port at random.
+- Choice times: truncated normal distribution (mean 500ms, std ≈ 116ms) — the time to move to a lever.
+- Multi-init probability: 0.1% per step (noise in centre pokes).
+- Multi-choice probability: 0.1% per step (occasional double choices, invalid).
+
+This generates a realistic sequence of left/right choices and timing, which the RPE models can then process.
+
+**What is stored per session:**
+
+```python
+self.rewards_collected        # reward at each time step
+self.rewards_avail_right/left # whether reward is available (baited) on each side
+self.trial_history            # per-trial: [right, left, rew_avail_R, rew_avail_L, rew_collected]
+self.actions                  # one-hot: [right, left, initiate] per time step
+```
+
+**Baiting logic** (implicit in the session structure): a reward "bates" on a side if it was not collected. On the next visit to that side, the baited reward is waiting. This means a side with low baseline probability can accumulate rewards if neglected, eventually making it worth visiting. The interplay between baseline probability and baiting probability is the key adaptive challenge the agent must learn.
+
+---
+
+### 10.6 `Figure 8.ipynb` — Analysis and Visualisation
+
+This notebook loads the simulation outputs and produces Figure 8 of the paper. It compares four "neuron types" at four task events.
+
+**Loading phase:**
+```python
+# APE data
+d = np.load('parker/APE_DA.npz')
+daL = d['da_left']       # VectorRPE/APE left agent: list of delta_feat vectors per trial
+scal_daL = d['scal_da_left']  # ScalarAPE left agent: list of scalar deltas per trial
+
+# RPE data
+d = np.load('parker/RPE_DA.npz')
+da = d['da_simple']      # VectorRPE: list of delta_feat vectors per trial
+```
+
+**State structure per trial:**
+Each trial's `states` list begins with multiple zeros (start state self-transitions during ITI), then the action path states. The function `find_choice_idx(states)` finds the first nonzero state — the moment of action commitment.
+
+**Four task events extracted per trial:**
+```python
+resp[0] = da[trial][0][i]                       # start state
+resp[1] = da[trial][choice_idx][i]              # choice moment
+resp[2] = da[trial][choice_idx + 1][i]          # first step after choice
+resp[3] = da[trial][-1][i]                      # outcome (reward or omission)
+```
+
+**Four neuron types compared:**
+- `LEFT_RPE_FEAT_IDX = 3`: the feature-specific RPE channel tuned to the left path states
+- `RIGHT_RPE_FEAT_IDX = 6`: the RPE channel tuned to the right path states
+- `scal_daL`: the scalar APE left-preferring neuron
+- `scal_daR`: the scalar APE right-preferring neuron
+
+**Four response conditions:**
+- Left choice in left block (lclb): left action, high reward probability
+- Left choice in right block (lcrb): left action, low reward probability
+- Right choice in left block (rclb): right action, low reward probability
+- Right choice in right block (rcrb): right action, high reward probability
+
+**What the plots show (Figure 8d):**
+
+At **action time**: Both left APE and left RPE neurons respond to left choices — this is unsurprising. But APE responds equally whether in a left or right block (action frequency doesn't depend on reward value), while RPE responds more when reward is more likely (value-modulated action response).
+
+At **outcome time**: Left RPE (feature-specific) responds to reward receipt because of the $r_t/N$ term. Left APE does NOT respond to reward — it fires on the action, is silent at outcome. This is the signature difference that matches the Parker et al. experimental data: SNc DA neurons responded to actions but NOT to outcomes in that task.
+
+**Saving intermediate results:**
+```python
+np.savez('parker/APE_agent_resps.npz', left=left_resps, right=right_resps)
+np.savez('parker/RPE_agent_resps.npz', left=left_resp, right=right_resp)
+```
+Each array has 4 entries: `[left_choice_resp, right_choice_resp, reward_resp, omission_resp]`.
+
+**Final bar plot**: 2×2 grid comparing APE vs. RPE at choice and outcome, for left and right neurons. The key pattern: APE > RPE at action time (APE responds more to the contralateral action); RPE > APE at outcome time (RPE responds to reward, APE is silent).
+
+---
+
+### 10.7 Connecting the Repository to Your Custom β Model
+
+The repository's structure provides a clean template for implementing your custom model. The mapping is:
+
+| Repository concept | Your custom model |
+|---|---|
+| `VectorRPEAgent.weights` | $w_i$ for each channel |
+| `compute_delta_feat(state_vec, succ_vec, reward)` | $\delta_{i,t} = r_t/(\beta_i N) + w_i(\gamma\phi_{i,t+1} - \phi_{i,t})$ |
+| `learn()` uses scalar `delta` | Adapt to use $\beta_i \delta_i$ or $\delta_{\rm total}$ |
+| Two agents (left/right) in parkerAPE | N agents (one per feature/location) |
+| `bandit_probs` fixed | $\beta_i$ proportional to block-specific probabilities |
+| `simulate_session.py` | Your eventual baiting task environment |
+
+To implement the custom model, you would:
+1. Add `self.betas = np.ones(num_features)` to `VectorRPEAgent.__init__`
+2. Modify `compute_delta_feat`: replace `reward / self.num_features` with `reward / (self.betas[i] * self.num_features)`
+3. Modify the value readout: $V_{\rm total} = \sum_i \beta_i w_i \phi_i$ (weighted dot product)
+4. Optionally: make $\beta_i$ learnable, updating via $\beta_i \leftarrow \beta_i + \alpha_\beta \delta_{\rm total} V_{i,t}$
+
+*This guide covers concepts and code structure. The code implementation guide follows in the next document.*
