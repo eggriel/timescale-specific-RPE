@@ -1,292 +1,291 @@
 """
 TimescalePEAgent.py
 ===================
-Custom β-weighted feature-specific RPE agent with two-timescale learning.
+Custom β-weighted RPE agent with N independent value channels, each learning
+a linear combination of J input features.  Two-timescale learning: weights W
+update slowly; channel gains β update fast.
 
-An extension of the Lee et al. (2024) feature-specific RPE model where different
-striatal/DA channels carry heterogeneous contribution weights β_i to the total
-value signal.  Both the synaptic weights w and the channel gains β are learned,
-with β updating at a faster timescale than w.
+Geometry
+--------
+    J = n_features   — dimension of the shared feature vector φ_t ∈ ℝ^J
+    N = n_values     — number of parallel value channels
 
-Model structure
----------------
-Feature channel i receives cortical feature φ_{i,t} ∈ ℝ (one scalar component
-of the full state feature vector) and maintains a scalar weight w_i.
+Each channel i maintains a weight vector  w_i ∈ ℝ^J  (row i of the N×J
+weight matrix W).  Channel i computes:
 
-    V_i(s)      = w_i · φ_i(s)                          (per-channel value)
-    V_total(s)  = Σ_i β_i V_i(s) = (β ⊙ w) · φ(s)     (total β-weighted value)
-    δ_total     = r_t + γ V_total(s') − V_total(s)       (scalar RPE on V_total)
+    V_i(s) = w_i · φ(s)         (dot product over all J features)
 
-Per-channel (feature-specific) prediction error — the DA signal:
-    δ_i = r_t / (β_i · N) + w_i · (γ φ_i(s') − φ_i(s))
+Total β-weighted value:
 
-Consistency identity:
-    Σ_i β_i δ_i = δ_total    (holds for any β_i > 0)
+    V_tot(s) = Σ_i β_i V_i(s) = β · (W φ(s))
+
+This is a many-to-many (J→N) mapping: every feature contributes to every
+value channel, each with its own learned weight.  This differs from
+VectorRPEAgent (one-to-one, N=J, scalar w_i) and OutcomePEAgent (N<J, same
+W for all channels, heterogeneity only in asymmetric learning rates).
+
+Biological interpretation
+--------------------------
+N striatal subregions each receive the same cortical feature vector φ_t
+(via topographic-but-overlapping projections), but learn a different linear
+readout w_i.  The β_i gains reflect the projection strength from each
+subregion onto the DA population.  DA reports δ_total = Σ_i β_i δ_i, the
+β-weighted sum of per-subregion prediction errors.
+
+Per-channel prediction error
+-----------------------------
+    δ_i = r_t / (β_i N)  +  w_i · (γ φ_{t+1} − φ_t)
+
+Consistency:  Σ_i β_i δ_i = δ_total = r + γ V_tot(t+1) − V_tot(t)  ✓
+
+Proof:
+    Σ_i β_i δ_i
+    = Σ_i [ r/N  +  β_i w_i·(γφ_{t+1}−φ_t) ]
+    = r  +  (β·W)·(γφ_{t+1}−φ_t)
+    = r  +  γ V_tot(t+1)  −  V_tot(t)   □
 
 Two-timescale learning
 ----------------------
-Loss:  L = ½ δ_total²
+Slow — weight update (local, one outer product per step):
+    W ← W + α · outer(δ_feat, φ_t)
+    i.e. w_i ← w_i + α · δ_i · φ_t   for each channel i
 
-Slow update — synaptic weights w (gradient of L w.r.t. w_i):
-    ∂L/∂w_i = −δ_total · β_i · φ_i(s)
-    w_i  ←  w_i + α_w · β_i · δ_total · φ_i(s)
+This is a LOCAL update: channel i uses only its own δ_i.  Because δ_i
+involves the full dot product  w_i·(γφ_{t+1}−φ_t)  (not just one feature),
+value propagates correctly across multiple time steps even with one-hot
+features.  Convergence to V* holds with standard TD conditions.
 
-Fast update — channel gains β (gradient of L w.r.t. β_i):
-    ∂L/∂β_i = −δ_total · V_i(s)   =   −δ_total · w_i · φ_i(s)
-    β_i  ←  β_i + α_β · δ_total · V_i(s)
+Fast — β update (gradient of ½δ_total² w.r.t. β_i):
+    ∂L/∂β_i = −δ_total · V_i(s_t)
+    β_i ← β_i + α_β · δ_total · V_i_old
+    (V_i_old computed with weights BEFORE the W update)
 
-with α_β > α_w (β updates faster).
-
-Crucially, both updates use the SAME δ_total computed with the weights and β
-values from the START of the step; V_i(s) = w_i_old · φ_i(s) is saved before
-w is modified, preserving the two-timescale separation.
-
-Intuition for why β should be faster
---------------------------------------
-• w encodes the *magnitude* of each channel's value prediction. This is a
-  precise numerical quantity that requires many samples to estimate reliably.
-• β encodes the *relevance* or *salience* of each channel — essentially which
-  features matter for predicting δ_total. This is a coarser, directional signal
-  (did channel i pull in the right direction?) that can be resolved quickly.
-• Formally this mirrors two-timescale stochastic approximation (Borkar 1997):
-  the fast β converges to a quasi-static equilibrium conditioned on slow w,
-  providing a stable platform on which w can make accurate gradient steps.
-• Biologically, β could correspond to a rapid gain-control or attentional
-  mechanism (e.g., neuromodulatory gating of corticostriatal projections),
-  while w corresponds to slower Hebbian synaptic consolidation.
-
-β regularisation
-----------------
-After the β update two constraints are enforced in order:
-  1. Clip:  β_i ← max(β_i, beta_min)   — prevents β from reaching 0 / going
-     negative, which would invert a channel's contribution to V_total.
-  2. Renormalise (optional):  β ← β · N / Σβ_i   — keeps Σβ_i = N so that
-     the scale of δ_total is comparable to a standard scalar RPE and prevents
-     all β_i drifting together without bound.
-
-Special cases
--------------
-• α_β = 0   : β fixed (static prior), reduces to the original model.
-• β_i = 1 ∀i: δ_i = r/N + w_i(γφ_{i+1} − φ_i), identical to VectorRPEAgent.
+β is clipped to beta_min then renormalised so Σ β_i = N.
 """
 
 import numpy as np
 
 
 class TimescalePEAgent:
-    def __init__(self, num_features, lr, gamma,
-                 betas=None,
-                 lr_beta=None,
-                 beta_min=1e-3,
-                 normalize_betas=True):
+    def __init__(self, n_features, n_values, lr, gamma,
+                 betas=None, lr_beta=None,
+                 beta_min=1e-3, normalize_betas=True, weight_noise=0.01, beta_noise=0.1):
         """
         Parameters
         ----------
-        num_features : int
-            Dimensionality of the feature vector φ(s).
-        lr : float
-            Learning rate for w (slow timescale), α_w.
-        gamma : float
-            Temporal discount factor γ.
-        betas : array-like of shape (num_features,) or None
-            Initial channel gain vector.  None → all 1s (= VectorRPEAgent).
-            Any strictly positive values are valid; the model normalises
-            internally if normalize_betas=True.
-        lr_beta : float or None
-            Learning rate for β (fast timescale), α_β.
-            None → 2 × lr  (twice as fast as w by default).
-            Set to 0 to disable β learning (fixed gains).
-        beta_min : float
-            Hard lower bound on β_i after each update.  Prevents β from
-            crossing zero, which would invert a channel's sign in V_total.
-            Default: 1e-3.
-        normalize_betas : bool
-            If True (default), renormalise β after each update so Σβ_i = N.
-            This keeps the scale of δ_total comparable to a standard RPE and
-            prevents unbounded growth.
+        n_features : int  — J, feature-vector dimension
+        n_values   : int  — N, number of parallel value channels
+        lr         : float — learning rate for W  (slow timescale)
+        gamma      : float — discount factor
+        betas      : array-like (N,) or None — initial channel gains
+                     (None → all ones)
+        lr_beta    : float or None — learning rate for β  (None → 2×lr)
+        beta_min   : float — hard lower bound on each β_i
+        normalize_betas : bool — keep Σ β_i = N after every β update
+        weight_noise : float — std of Gaussian noise added to initial W (default 0.01).
+        beta_noise   : float — std of noise added to initial β (default 0.1).
+            This is the primary symmetry-breaker for β: channels get different
+            gains from step one, so the gradient δ_total·V_i is non-uniform
+            immediately.  weight_noise alone forces β to wait until weight
+            differences grow into distinct V_i — which can take hundreds of
+            episodes.  Set beta_noise=0 to start from a perfectly flat prior.
         """
-        self.num_features    = num_features
+        self.n_features      = n_features   # J
+        self.n_values        = n_values     # N
         self.alpha           = lr
-        self.alpha_beta      = (2.0 * lr) if lr_beta is None else float(lr_beta)
+        self.alpha_beta      = (10.0 * lr) if lr_beta is None else float(lr_beta)
         self.gamma           = gamma
         self.beta_min        = beta_min
         self.normalize_betas = normalize_betas
 
-        self.weights = np.zeros(num_features)
+        # Weight matrix W ∈ ℝ^{N×J}; row i is w_i
+        if weight_noise > 0:
+            self.weights = np.random.randn(n_values, n_features) * weight_noise
+        else:
+            self.weights = np.zeros((n_values, n_features))
 
+        # Channel gains β ∈ ℝ^N
+        # Start from explicit values or ones, then add noise to break symmetry.
         if betas is None:
-            self.betas = np.ones(num_features)
+            self.betas = np.ones(n_values, dtype=float)
         else:
             self.betas = np.asarray(betas, dtype=float).copy()
+            if self.betas.shape != (n_values,):
+                raise ValueError(f"betas must have shape ({n_values},), got {self.betas.shape}")
             if np.any(self.betas <= 0):
                 raise ValueError("All initial β_i must be strictly positive.")
 
-    # ------------------------------------------------------------------
-    # Value computation
-    # ------------------------------------------------------------------
+        if beta_noise > 0:
+            # Use abs() so all values stay positive; normalise so Σβ_i = N
+            # self.betas = np.random.randn(n_values) * beta_noise
+
+            self.betas += np.abs(np.random.randn(n_values)) * beta_noise
+            np.clip(self.betas, self.beta_min, None, out=self.betas)
+            self.betas *= n_values / self.betas.sum()
+
+    # ── Value ──────────────────────────────────────────────────────────────────
 
     def val(self, state_vec):
         """
-        Total β-weighted value:  V_total(s) = (β ⊙ w) · φ(s).
+        Scalar total value:  V_tot = β · (W φ).
 
         Parameters
         ----------
-        state_vec : np.ndarray, shape (num_features,)
+        state_vec : (n_features,)
 
         Returns
         -------
         float
         """
-        return float(np.dot(self.betas * self.weights, state_vec))
+        return float(np.dot(self.betas, self.weights @ state_vec))
 
     def val_per_channel(self, state_vec):
         """
-        Per-channel values:  V_i(s) = w_i · φ_i(s).
-
-        Returns
-        -------
-        np.ndarray, shape (num_features,)
-        """
-        return self.weights * state_vec
-
-    # ------------------------------------------------------------------
-    # Prediction error computation
-    # ------------------------------------------------------------------
-
-    def compute_delta_feat(self, state_vec, succ_vec, reward):
-        """
-        Per-channel prediction errors — the DA signal:
-
-            δ_i = r / (β_i · N) + w_i · (γ · φ_i(s') − φ_i(s))
+        Per-channel values  V_i = w_i · φ,  shape (N,).
 
         Parameters
         ----------
-        state_vec : np.ndarray, shape (num_features,)
-        succ_vec  : np.ndarray, shape (num_features,)
+        state_vec : (n_features,)
+
+        Returns
+        -------
+        np.ndarray, shape (N,)
+        """
+        return self.weights @ state_vec   # (N, J) @ (J,) = (N,)
+
+    # ── Prediction errors ──────────────────────────────────────────────────────
+
+    def compute_delta_feat(self, state_vec, succ_vec, reward):
+        """
+        Per-channel prediction errors  δ_i = r/(β_i N) + w_i·(γφ'−φ),  shape (N,).
+
+        Parameters
+        ----------
+        state_vec : (n_features,)
+        succ_vec  : (n_features,)
         reward    : float
 
         Returns
         -------
-        np.ndarray, shape (num_features,)
+        np.ndarray, shape (N,)
         """
-        N             = self.num_features
-        reward_term   = reward / (self.betas * N)
-        temporal_diff = self.weights * (self.gamma * succ_vec - state_vec)
+        N             = self.n_values
+        reward_term   = reward / (self.betas * N)                         # (N,)
+        temporal_diff = self.weights @ (self.gamma * succ_vec - state_vec) # (N,)
         return reward_term + temporal_diff
 
     def compute_delta(self, state_vec, succ_vec, reward):
         """
-        Total scalar RPE:  δ_total = Σ_i β_i δ_i = r + γ V_total(s') − V_total(s).
-
-        Returns
-        -------
-        float
+        Total RPE:  δ_total = Σ_i β_i δ_i  (scalar).
         """
-        return float(np.dot(self.betas,
-                            self.compute_delta_feat(state_vec, succ_vec, reward)))
+        return float(np.dot(self.betas, self.compute_delta_feat(state_vec, succ_vec, reward)))
 
-    # ------------------------------------------------------------------
-    # Two-timescale learning
-    # ------------------------------------------------------------------
+    # ── Two-timescale learning ─────────────────────────────────────────────────
 
     def learn(self, state_vec, succ_vec, reward, ret_da=True):
         """
-        Single-step two-timescale update.
+        One-step two-timescale update.
 
-        Order of operations (preserving two-timescale separation):
-          1. Compute δ_feat and δ_total with CURRENT (old) w and β.
-          2. Cache V_i = w_i · φ_i(s) with OLD w — used in β gradient.
-          3. Slow update:  w  ←  w  +  α_w · β · δ_total · φ(s)
-          4. Fast update:  β  ←  β  +  α_β · δ_total · V_old
-          5. Clip β to beta_min; renormalise if normalize_betas=True.
+        Order:
+          1. Compute δ_feat and δ_total with OLD W and OLD β.
+          2. Cache V_old = W φ(s)  (used in β gradient).
+          3. Slow:  W  ← W  + α · outer(δ_feat, φ(s))
+                    i.e. w_i ← w_i + α · δ_i · φ(s)   (local update)
+          4. Fast:  β  ← β  + α_β · δ_total · V_old
+          5. clip(β, beta_min);  optionally renormalise Σβ_i = N.
 
         Parameters
         ----------
-        state_vec : np.ndarray, shape (num_features,)
-        succ_vec  : np.ndarray, shape (num_features,)
+        state_vec : (n_features,)
+        succ_vec  : (n_features,)
         reward    : float
-        ret_da    : bool
-            Return per-channel δ_i (DA signal vector) if True.
+        ret_da    : bool — return δ_feat (the DA signal vector)
 
         Returns
         -------
-        np.ndarray, shape (num_features,) or None
+        np.ndarray shape (N,) or None
         """
-        # 1. DA signal + total PE — computed with OLD w and OLD β
-        delta_feat  = self.compute_delta_feat(state_vec, succ_vec, reward)
+        # 1. DA signal + total error — OLD W, OLD β
+        delta_feat  = self.compute_delta_feat(state_vec, succ_vec, reward)  # (N,)
         delta_total = float(np.dot(self.betas, delta_feat))
 
-        # 2. Per-channel value with OLD w  (used for β gradient)
-        V_old = self.weights * state_vec   # V_i = w_i · φ_i(s)
+        # 2. Per-channel values with OLD W
+        V_old = self.weights @ state_vec   # (N,)
 
-        # 3. Slow w update:  w += α_w · β · δ_total · φ(s)
-        self.weights += self.alpha * self.betas * delta_total * state_vec
+        # 3. Slow W update: W += α · δ_feat[:,None] · φ[None,:]
+        self.weights += self.alpha * np.outer(delta_feat, state_vec)
 
-        # 4. Fast β update:  β += α_β · δ_total · V_old
-        #    ∂L/∂β_i = −δ_total · V_i  →  gradient-descent step adds α_β·δ_total·V_i
+        # 4. Fast β update: β += α_β · δ_total · V_old
         if self.alpha_beta != 0.0:
             self.betas += self.alpha_beta * delta_total * V_old
-
-            # 5. Regularise β
             np.clip(self.betas, self.beta_min, None, out=self.betas)
             if self.normalize_betas:
-                self.betas *= self.num_features / self.betas.sum()
+                self.betas *= self.n_values / self.betas.sum()
 
         if ret_da:
-            return delta_feat   # shape (num_features,)
+            return delta_feat   # (N,)
 
 
-# ---------------------------------------------------------------------------
-# Stand-alone tests
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-tests
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     from VectorRPEAgent import VectorRPEAgent
-    import sys
 
-    num_states = 6
-    lr         = 0.05
-    gamma      = 0.95
+    n_states = 6
+    J        = n_states   # one-hot features → J = n_states
+    lr       = 0.01
+    gamma    = 0.95
 
     def phi(s):
-        v = np.zeros(num_states)
-        v[s] = 1.0
-        return v
+        v = np.zeros(J); v[s] = 1.0; return v
 
-    # ── Test 1: flat β (no update) matches VectorRPEAgent ──────────────
-    vrpe      = VectorRPEAgent(num_states, lr, gamma)
-    tpe_fixed = TimescalePEAgent(num_states, lr, gamma, lr_beta=0)  # β fixed
+    # ── Test 3: N=4 channels, verify V_tot converges to V* ──────────────────
+    tpe3  = TimescalePEAgent(J, n_values=4, lr=lr, gamma=gamma,
+                             betas=[1.5, 0.5, 1.0, 2.0], lr_beta=10*lr)
+    for _ in range(10000):
+        for s in range(n_states - 1):
+            r = 1.0 if s == n_states - 2 else 0.0
+            tpe3.learn(phi(s), phi(s+1), r)
 
-    for _ in range(20000):
-        for s in range(num_states - 1):
-            r = 1.0 if s == num_states - 2 else 0.0
-            vrpe.learn(phi(s), phi(s + 1), r)
-            tpe_fixed.learn(phi(s), phi(s + 1), r)
+    # After sufficient training (e.g. 30000 passes):
+    # tpe3.weights shape: (4, 6)  →  W[i, s] = V_i(s)  (one-hot features)
+    # tpe3.betas   shape: (4,)
 
-    print("── Test 1: fixed β=1 vs VectorRPEAgent ──")
-    print("VectorRPE w: ", np.round(vrpe.weights, 4))
-    print("TPE fixed w: ", np.round(tpe_fixed.weights, 4))
-    print("Match:       ", np.allclose(vrpe.weights, tpe_fixed.weights, atol=1e-6))
+    # 1. Per-channel values at every state: shape (4, 6)
+    V_channels = tpe3.weights.copy()          # W[i, s] = V_i(s)
 
-    # ── Test 2: learned β at 2× rate ───────────────────────────────────
-    tpe_learn = TimescalePEAgent(num_states, lr, gamma,
-                                 lr_beta=2*lr,       # 2× faster β
-                                 normalize_betas=True)
+    # 2. Weighted sum at every state: shape (6,)  ←  this should equal V_total
+    V_reconstructed = tpe3.betas @ V_channels  # (4,) @ (4, 6) = (6,)
 
-    beta_history = [tpe_learn.betas.copy()]
-    for _ in range(20000):
-        for s in range(num_states - 1):
-            r = 1.0 if s == num_states - 2 else 0.0
-            tpe_learn.learn(phi(s), phi(s + 1), r)
-        if _ % 4000 == 0:
-            beta_history.append(tpe_learn.betas.copy())
+    # 3. V_total from agent.val() for comparison
+    V_total = np.array([tpe3.val(phi(s)) for s in range(n_states)])
 
-    print("\n── Test 2: learned β (α_β = 2α_w) ──")
-    print("Final β: ", np.round(tpe_learn.betas, 4))
-    print("Σβ/N = 1?", np.isclose(tpe_learn.betas.mean(), 1.0))
-    print("V_total(s=0):", round(tpe_learn.val(phi(0)), 4),
-          "  (VectorRPE: {:.4f})".format(vrpe.weights[0]))
+    # 4. Theoretical target: γ^d where d = distance to reward state
+    reward_state = n_states - 2              # state 4 in a 6-state chain
+    V_theory = np.array([
+        gamma ** abs(s - reward_state) if s <= reward_state else 0.0
+        for s in range(n_states)
+    ])
 
-    # β should be larger for states closer to reward
-    print("β monotonically increasing toward reward state?",
-          all(tpe_learn.betas[i] <= tpe_learn.betas[i+1]
-              for i in range(num_states - 2)))
+    print("Channel values V_i(s)  [shape (N, n_states)]:")
+    print(np.round(V_channels, 4))
+    print()
+    print(f"{'State':>6} {'V_recon':>10} {'V_total':>10} {'V_theory':>10} {'match':>8}")
+    for s in range(n_states):
+        match = abs(V_reconstructed[s] - V_total[s]) < 1e-10
+        print(f"  s={s}   {V_reconstructed[s]:>10.4f} {V_total[s]:>10.4f} "
+            f"{V_theory[s]:>10.4f}   {'✓' if match else '✗ FAIL'}")
+
+    print()
+    print("Max error |Σβ_i V_i − V_total|:", np.abs(V_reconstructed - V_total).max())
+    print("Max error |V_total − V_theory|:", np.abs(V_total - V_theory).max(),
+        "← nonzero until convergence")
+
+    # 5. The key check at the reward state: Σ_i β_i V_i(reward_state) ≈ r = 1
+    reward_contrib = tpe3.betas * V_channels[:, reward_state]
+    print(f"\nAt reward state s={reward_state}:")
+    print(f"  β:              {np.round(tpe3.betas, 4)}")
+    print(f"  V_i(s):         {np.round(V_channels[:, reward_state], 4)}")
+    print(f"  β_i * V_i(s):   {np.round(reward_contrib, 4)}")
+    print(f"  Σ β_i V_i(s) = {reward_contrib.sum():.6f}   (target r = 1.0)")

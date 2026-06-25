@@ -590,74 +590,82 @@ Your model is an extension of Lee et al.'s feature-specific RPE that introduces 
 - Different features may have different "relevances" to the global value signal
 - The model can be generalized to the baiting task where different sides have different baseline reward probabilities (analogous to different $\beta_i$ values)
 
+### Geometry: from scalar to vector weights
+
+Two independent dimensions define the model:
+
+- $J$ = **number of features** (dimension of the shared cortical feature vector $\vec{\phi}_t \in \mathbb{R}^J$)
+- $N$ = **number of value channels** (number of striatal subregions, e.g. one per candidate goal location)
+
+Each channel $i$ maintains a **weight vector** $\vec{w}_i \in \mathbb{R}^J$ — not a scalar — collected into a weight matrix $W \in \mathbb{R}^{N \times J}$ whose $i$-th row is $\vec{w}_i$. Every feature contributes to every channel (many-to-many, $J \to N$). $N$ and $J$ are **independent**: $N$ can be set to the number of task-relevant outcomes (e.g. goal locations), while $J$ is the feature dimensionality.
+
 ### Full Mathematical Formulation
 
-**Per-unit value** (unit $i$ receives scalar feature $\phi_{i,t}$, has scalar weight $w_i$):
-$$V_{i,t} = w_i \cdot \phi_{i,t}$$
+**Per-channel value** (channel $i$ reads the **full** feature vector):
+$$V_{i,t} = \vec{w}_i \cdot \vec{\phi}_t \qquad (\vec{w}_i \in \mathbb{R}^J,\; \vec{\phi}_t \in \mathbb{R}^J)$$
 
-**Total value** (weighted sum):
-$$V_{\text{total},t} = \sum_i \beta_i V_{i,t} = \sum_i \beta_i w_i \phi_{i,t}$$
+**Total value** ($\beta$-weighted sum over channels):
+$$V_{\text{total},t} = \sum_i \beta_i V_{i,t} = \vec{\beta} \cdot (W\vec{\phi}_t)$$
 
-**Total TD error** (standard RPE over total value):
+**Total TD error**:
 $$\delta_{\text{total}} = r_t + \gamma V_{\text{total},t+1} - V_{\text{total},t}$$
 
-**Unit-specific PE**:
-$$\boxed{\delta_{i,t} = \frac{r_t}{\beta_i N} + w_i(\gamma\phi_{i,t+1} - \phi_{i,t})}$$
+**Per-channel prediction error** (the DA signal for channel $i$):
+$$\boxed{\delta_{i,t} = \frac{r_t}{\beta_i N} + \vec{w}_i \cdot (\gamma\vec{\phi}_{t+1} - \vec{\phi}_t)}$$
+
+The temporal-difference term is a **dot product over all $J$ features**, not a product with a single feature. This is the critical difference from the old scalar formulation.
 
 ### Derivation: Consistency Identity
 
-We want $\sum_i \beta_i \delta_{i,t} = \delta_{\text{total}}$. Verify:
-$$\sum_i \beta_i \delta_{i,t} = \sum_i \beta_i \left[\frac{r_t}{\beta_i N} + w_i(\gamma\phi_{i,t+1} - \phi_{i,t})\right]$$
-$$= \sum_i \frac{r_t}{N} + \sum_i \beta_i w_i(\gamma\phi_{i,t+1} - \phi_{i,t})$$
-$$= r_t + \gamma\sum_i \beta_i w_i \phi_{i,t+1} - \sum_i \beta_i w_i \phi_{i,t}$$
+We want $\sum_i \beta_i \delta_{i,t} = \delta_{\text{total}}$. Expand:
+$$\sum_i \beta_i \delta_{i,t} = \sum_i \left[\frac{r_t}{N} + \beta_i \vec{w}_i \cdot (\gamma\vec{\phi}_{t+1} - \vec{\phi}_t)\right]$$
+$$= r_t + (\vec{\beta} \cdot W)(\gamma\vec{\phi}_{t+1} - \vec{\phi}_t)$$
 $$= r_t + \gamma V_{\text{total},t+1} - V_{\text{total},t} = \delta_{\text{total}} \checkmark$$
 
-The $\beta_i$ cancel in the reward term (because $\beta_i \cdot \frac{r_t}{\beta_i N} = \frac{r_t}{N}$, independent of $\beta_i$), meaning the reward is always split equally across channels regardless of $\beta_i$. The $\beta_i$ weighting only enters through the value-prediction term.
+The $\beta_i$ cancels in the reward term (because $\beta_i \cdot \frac{r_t}{\beta_i N} = \frac{r_t}{N}$), so the reward is always split equally across channels. The $\beta_i$ weighting only enters through the value-prediction term.
 
 ### Interpretation of $\beta_i$
 
 **Effect on reward signal received**: $r_t / (\beta_i N)$
 - Units with **large** $\beta_i$ receive a **smaller** reward signal per unit
 - Units with **small** $\beta_i$ receive a **larger** reward signal per unit
-- Intuitively: high-$\beta_i$ units contribute more to total value through their feature predictions; they "need" less direct reward to stay calibrated
+- Intuitively: high-$\beta_i$ channels contribute more to total value; they "need" less direct reward signal to stay calibrated
 
 **Effect on value contribution**: $\beta_i V_{i,t}$
-- High-$\beta_i$ units have amplified contributions to total value
-- This makes them more "powerful" value-shapers — their weight $w_i$ has a larger effect on behavior through value-guided action selection
+- High-$\beta_i$ channels have amplified contributions to total value
+- Their weight matrix row $\vec{w}_i$ has a larger effect on behavior through value-guided action selection
 
-**Biological analogy**: $\beta_i$ could represent the density or efficacy of the striatal-to-DA projection for channel $i$ — how much DA activity is driven by unit $i$'s value readout.
+**Biological analogy**: $\beta_i$ represents the projection strength from striatal subregion $i$ onto the DA population. Different subregions receive differently weighted mixtures of cortical features (captured by $\vec{w}_i$), and project with different gains ($\beta_i$) onto the DA signal.
 
-### Update Rules
+### Update Rule (local, biologically plausible)
 
-**Option 1: Local update** (biologically most plausible — each unit updates by its own local PE):
-$$w_i \leftarrow w_i + \alpha \, \delta_{i,t} \, \phi_{i,t}$$
+$$\vec{w}_i \leftarrow \vec{w}_i + \alpha \, \delta_{i,t} \, \vec{\phi}_t$$
 
-**Option 2: Global update** (uses the full scalar RPE — biologically plausible if DA broadcasts diffusely):
-$$w_i \leftarrow w_i + \alpha \, \delta_{\text{total}} \, \phi_{i,t}$$
+In matrix form — one outer product per step:
+$$W \leftarrow W + \alpha \cdot \text{outer}(\vec{\delta}_t,\, \vec{\phi}_t)$$
 
-**Option 3: Scaled local update** (gradient of $\mathcal{L} = \frac{1}{2}\delta_{\text{total}}^2$ w.r.t. $w_i$):
+where $\vec{\delta}_t = [\delta_{1,t}, \ldots, \delta_{N,t}]^T$.
 
-The proper gradient is:
-$$\frac{\partial \mathcal{L}}{\partial w_i} = -\delta_{\text{total}} \cdot \frac{\partial V_{\text{total},t}}{\partial w_i} = -\delta_{\text{total}} \cdot \beta_i \phi_{i,t}$$
+**Why this now propagates value correctly.** At convergence $\delta_{i,t} = 0$ gives:
+$$\vec{w}_i \cdot \vec{\phi}(s) = \frac{r(s)}{\beta_i N} + \gamma\, \vec{w}_i \cdot \vec{\phi}(s')$$
 
-Gradient descent:
-$$w_i \leftarrow w_i + \alpha \, \delta_{\text{total}} \cdot \beta_i \, \phi_{i,t}$$
+This is the Bellman equation for $V_i(s)$. Each channel converges to $V_i^*(s) = V^*(s)/(\beta_i N)$, and:
+$$V_{\text{total}}(s) = \sum_i \beta_i V_i^*(s) = V^*(s) \checkmark$$
 
-But since $\delta_{\text{total}} = \sum_j \beta_j \delta_{j,t}$, this becomes:
-$$w_i \leftarrow w_i + \alpha \left(\sum_j \beta_j \delta_{j,t}\right) \beta_i \, \phi_{i,t}$$
-
-The choice of update rule has important implications for learning dynamics and biological plausibility. **Option 1 is recommended** for biological modeling; **Option 3 is recommended** for normative/optimization analysis.
+This was **not** true in the old scalar ($N = J$, one-to-one) formulation, where $\vec{w}_i \cdot (\gamma\vec{\phi}_{t+1} - \vec{\phi}_t)$ collapsed to $w_i(\gamma\phi_i(s') - 1)$, making the update blind to value accumulated by other features at $s'$.
 
 ### Comparison with Lee et al. Feature-Specific Model
 
-| Aspect | Lee et al. (2024) | Custom β Model |
+| Aspect | Lee et al. (2024) | Corrected TimescalePE |
 |---|---|---|
-| Value | $V_{\text{total}} = \sum_i V_{i,t}$ | $V_{\text{total}} = \sum_i \beta_i V_{i,t}$ |
-| Unit PE | $\delta_{i,t} = \frac{r_t}{N} + w_i(\gamma\phi_{i,t+1} - \phi_{i,t})$ | $\delta_{i,t} = \frac{r_t}{\beta_i N} + w_i(\gamma\phi_{i,t+1} - \phi_{i,t})$ |
-| Reward attribution | Equal across all units | Inversely weighted by $\beta_i$ |
-| Feature contribution to value | Equal $\beta_i = 1$ for all $i$ | Heterogeneous $\beta_i$ |
-| Extra parameter | None | $\{\beta_i\}_{i=1}^N$ |
-| Reduces to Lee et al. | — | When all $\beta_i = 1$ |
+| Dimensions | $N = J$ (one channel per feature) | $N$ and $J$ independent |
+| Weight | $w_i \in \mathbb{R}$ (scalar) | $\vec{w}_i \in \mathbb{R}^J$ (vector) |
+| Value | $V_i = w_i \phi_{i,t}$ (one feature) | $V_i = \vec{w}_i \cdot \vec{\phi}_t$ (all features) |
+| $V_{\text{total}}$ | $\sum_i V_{i,t}$ | $\sum_i \beta_i V_{i,t}$ |
+| Unit PE | $\delta_{i,t} = \frac{r_t}{N} + w_i(\gamma\phi_{i,t+1} - \phi_{i,t})$ | $\delta_{i,t} = \frac{r_t}{\beta_i N} + \vec{w}_i \cdot (\gamma\vec{\phi}_{t+1} - \vec{\phi}_t)$ |
+| Local update valid? | No (breaks at >1 step) | **Yes** (full Bellman convergence) |
+| Extra parameter | None | $\beta \in \mathbb{R}^N$, learned |
+| Reduces to Lee et al. | — | When $N=J$, $\beta_i=1$, $\vec{w}_i = w_i \vec{e}_i$ |
 
 ### Optional: Learning $\beta_i$
 

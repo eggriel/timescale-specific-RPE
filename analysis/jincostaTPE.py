@@ -111,6 +111,7 @@ tuning_scale= 0.30
 num_copies  = 3
 num_states  = 1 + 2 * press_thresh          # 7
 chunked_features = num_states * num_copies  # 21
+N_VALUES         = 2                         # left value channel + right value channel
 num_outcome_channels = 7
 
 phi_cg = build_phi_chunked_graded(press_thresh, num_copies, is_chunked,
@@ -125,15 +126,18 @@ _betas_ts    = _beta_scales * (chunked_features / _beta_scales.sum())
 #  Each model type has two instances: one that treats left press as "reward",
 #  one that treats right press as "reward".  This mirrors jincosta.py's design.
 
+# β for timescale model: N_VALUES=2 channels; first channel gets lower β (earlier timescale)
+_betas_ts_vals = np.array([0.6, 1.4]) * (N_VALUES / np.array([0.6, 1.4]).sum())
+
 agents = {
     'vrpe':      (VectorRPEAgent(chunked_features, lr, gamma),
                   VectorRPEAgent(chunked_features, lr, gamma)),
     'outcome':   (OutcomePEAgent(chunked_features, num_outcome_channels, lr, gamma),
                   OutcomePEAgent(chunked_features, num_outcome_channels, lr, gamma)),
-    'tpe_flat':  (TimescalePEAgent(chunked_features, lr, gamma, lr_beta=lr_beta),
-                  TimescalePEAgent(chunked_features, lr, gamma, lr_beta=lr_beta)),
-    'tpe_ts':    (TimescalePEAgent(chunked_features, lr, gamma, betas=_betas_ts, lr_beta=lr_beta),
-                  TimescalePEAgent(chunked_features, lr, gamma, betas=_betas_ts, lr_beta=lr_beta)),
+    'tpe_flat':  (TimescalePEAgent(chunked_features, N_VALUES, lr, gamma, lr_beta=lr_beta),
+                  TimescalePEAgent(chunked_features, N_VALUES, lr, gamma, lr_beta=lr_beta)),
+    'tpe_ts':    (TimescalePEAgent(chunked_features, N_VALUES, lr, gamma, betas=_betas_ts_vals, lr_beta=lr_beta),
+                  TimescalePEAgent(chunked_features, N_VALUES, lr, gamma, betas=_betas_ts_vals, lr_beta=lr_beta)),
 }
 # agents[key] = (left_agent, right_agent)
 
@@ -242,7 +246,8 @@ for trial in range(num_trials):
 
 # ─── Save ─────────────────────────────────────────────────────────────────────
 
-np.savez('./data/jincosta/TPE_DA.npz',
+os.makedirs('./data/jincosta/TPE', exist_ok=True)
+np.savez('./data/jincosta/TPE/DA.npz',
          da_vrpe_L=da_stores['vrpe'][0],
          da_vrpe_R=da_stores['vrpe'][1],
          da_outcome_L=da_stores['outcome'][0],
@@ -261,4 +266,4 @@ np.savez('./data/jincosta/TPE_DA.npz',
          num_outcome_channels=num_outcome_channels,
          chunked_features=chunked_features)
 
-print(f"jincostaTPE done.  Saved {num_trials} trials to ./data/jincosta/TPE_DA.npz")
+print(f"jincostaTPE done.  Saved {num_trials} trials to ./data/jincosta/TPE/DA.npz")

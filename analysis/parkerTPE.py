@@ -64,6 +64,7 @@ left_states  = [3, 4, 5]
 right_states = [left_states[-1] + 1 + i for i in range(len(left_states))]
 state_paths  = [left_states, right_states]
 num_states   = 3 + len(left_states) + len(right_states)   # 9
+N_VALUES     = 2       # left value channel + right value channel
 trial_start_probability   = 0.20
 outcome_delay_probability = 0.05
 
@@ -91,9 +92,9 @@ _betas_biased = _betas_raw * (num_states / _betas_raw.sum())   # normalise sum �
 
 vrpe_agent    = VectorRPEAgent(num_states, lr, gamma_rpe)
 outcome_agent = OutcomePEAgent(num_states, num_outcome_channels, lr, gamma_rpe)
-tpe_flat      = TimescalePEAgent(num_states, lr, gamma_rpe,
+tpe_flat      = TimescalePEAgent(num_states, N_VALUES, lr, gamma_rpe,
                                  lr_beta=lr_beta)              # β starts uniform, learned
-tpe_biased    = TimescalePEAgent(num_states, lr, gamma_rpe,
+tpe_biased    = TimescalePEAgent(num_states, N_VALUES, lr, gamma_rpe,
                                  betas=_betas_biased,
                                  lr_beta=lr_beta)              # β starts reward-biased, then learned
 
@@ -113,7 +114,7 @@ epoch_type    = 0
 
 # β snapshots every snapshot_interval trials
 snapshot_interval   = 500
-beta_flat_history   = []
+beta_flat_history   = []   # each entry is (N_VALUES,)
 beta_biased_history = []
 beta_snapshot_trials= []
 
@@ -199,7 +200,8 @@ for trial in range(num_trials):
 
 # ─── Save ─────────────────────────────────────────────────────────────────────
 
-np.savez('./data/parker/TPE_DA.npz',
+os.makedirs('./data/parker/TPE', exist_ok=True)
+np.savez('./data/parker/TPE/DA.npz',
          da_vrpe=da_vrpe,
          da_outcome=da_outcome,
          da_tpe_flat=da_tpe_flat,
@@ -220,5 +222,5 @@ np.savez('./data/parker/TPE_DA.npz',
          gamma=gamma_rpe,
          lr=lr)
 
-print(f"parkerTPE done.  Saved {num_trials} trials to ./data/parker/TPE_DA.npz")
+print(f"parkerTPE done.  Saved {num_trials} trials to ./data/parker/TPE/DA.npz")
 print(f"  Reward trials: {len(reward_trials)} / {num_trials}")
