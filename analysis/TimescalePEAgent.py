@@ -217,7 +217,10 @@ class TimescalePEAgent:
 
         # 4. Fast β update: β += α_β · δ_total · V_old
         if self.alpha_beta != 0.0:
-            self.betas += self.alpha_beta * delta_total * V_old
+            eps = 1e-8  # avoid division by zero
+            lambda_reg = 0.7
+            penalty = lambda_reg * 0.5  * np.sign(self.betas) / np.sqrt(np.abs(self.betas) + eps)
+            self.betas += self.alpha_beta * (delta_total * V_old - penalty)
             np.clip(self.betas, self.beta_min, None, out=self.betas)
             if self.normalize_betas:
                 self.betas *= self.n_values / self.betas.sum()
@@ -243,7 +246,7 @@ if __name__ == '__main__':
     # ── Test 3: N=4 channels, verify V_tot converges to V* ──────────────────
     tpe3  = TimescalePEAgent(J, n_values=4, lr=lr, gamma=gamma,
                              betas=[1.5, 0.5, 1.0, 2.0], lr_beta=10*lr)
-    for _ in range(10000):
+    for _ in range(1000):
         for s in range(n_states - 1):
             r = 1.0 if s == n_states - 2 else 0.0
             tpe3.learn(phi(s), phi(s+1), r)

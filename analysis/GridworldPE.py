@@ -38,14 +38,14 @@ from VectorRPEAgent   import VectorRPEAgent
 from OutcomePEAgent   import OutcomePEAgent
 from TimescalePEAgent import TimescalePEAgent
 
-np.random.seed(42)
+np.random.seed(40)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Hyper-parameters
 # ═══════════════════════════════════════════════════════════════════════════════
 H, W          = 7, 7
 N_STATES      = H * W          # 49
-FEATURE_MODE  = 'rbf_coarse'   # options: rbf_full | rbf_coarse | rbf_minimal | factored | fourier | goal_centric
+FEATURE_MODE  = 'rbf_full'   # options: rbf_full | rbf_coarse | rbf_minimal | factored | fourier | goal_centric
 #   rbf_full     — one RBF per cell  (N = H*W = 49)   [original]
 #   rbf_coarse   — 4x4 coarse grid  (N = 16,  sigma auto)
 #   rbf_minimal  — 3x3 coarse grid  (N = 9,   sigma auto)
@@ -54,15 +54,15 @@ FEATURE_MODE  = 'rbf_coarse'   # options: rbf_full | rbf_coarse | rbf_minimal | 
 #   goal_centric — cardinal-direction distance to each unique goal (N = 4 * n_unique_goals)
 N_OUT_CH      = 7              # expectile channels for OutcomePE
 N_VALUES      = 4              # TimescaleRPE: one value channel per unique goal
-LR_W          = 0.01
-LR_BETA       = 0.1          # β lr — 10× LR_W
+LR_W          = 0.0003
+LR_BETA       = 0.003      # β lr 
 GAMMA_RPE     = 0.95
 GAMMA_APE     = 0.50           # shorter horizon for action-frequency prediction
 SOFTMAX_TEMP  = 0.5
-EPS_PER_BLOCK = 50
-N_BLOCKS      = 32
+EPS_PER_BLOCK = 30
+N_BLOCKS      = 36
 MAX_STEPS     = 60
-CKPT_INTERVAL = 25             # save maps every N episodes
+CKPT_INTERVAL = 10            # save maps every N episodes
 
 # Goal schedule: 4 inner corners, visited twice
 GOALS = [
@@ -74,6 +74,14 @@ GOALS = [
     (1, 1), (5, 5), (1, 5), (5, 1),
     (1, 1), (5, 5), (1, 5), (5, 1),
     (1, 1), (5, 5), (1, 5), (5, 1),
+    (1, 1), (5, 5), (1, 5), (5, 1),
+ 
+  
+
+
+
+
+
     
 ]
 assert len(GOALS) == N_BLOCKS
@@ -407,21 +415,13 @@ agents = {
     'VectorRPE':   VectorRPEAgent(N_FEATURES,  lr=LR_W,   gamma=GAMMA_RPE),
     'TimescaleRPE':TimescalePEAgent(N_FEATURES, N_VALUES, lr=LR_W, gamma=GAMMA_RPE,
                                     lr_beta=LR_BETA, normalize_betas=True,
-                                    weight_noise=0.01),
+                                    weight_noise=0.1,beta_noise=0.1),
 }
 
 # APE: nav agent + 4 directional observers
 ape_nav  = VectorRPEAgent(N_FEATURES, lr=LR_W,  gamma=GAMMA_RPE)
 ape_dirs = [VectorRPEAgent(N_FEATURES, lr=LR_W, gamma=GAMMA_APE)
             for _ in range(4)]
-
-# Goal-biased weight initialisation for TimescaleRPE.
-# Channel i starts with a small weight toward unique goal i's feature vector.
-# This seeds the symmetry-breaking so β_i can rise for the currently active goal.
-_unique_goals = list(dict.fromkeys(map(tuple, GOALS)))
-for _ch, (_gr, _gc) in enumerate(_unique_goals[:N_VALUES]):
-    _gs = pos_to_idx(_gr, _gc)
-    agents['TimescaleRPE'].weights[_ch] += PHI[_gs] * 0.1
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Storage

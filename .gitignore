@@ -1,4 +1,5 @@
 /data/
 .DS_Store
-APE analysis/.DS_Store
+/analysis/.DS_Store
 .DS_Store
+/analysis/__pycache__/
