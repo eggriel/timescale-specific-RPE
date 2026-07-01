@@ -54,15 +54,15 @@ FEATURE_MODE  = 'rbf_full'   # options: rbf_full | rbf_coarse | rbf_minimal | fa
 #   goal_centric — cardinal-direction distance to each unique goal (N = 4 * n_unique_goals)
 N_OUT_CH      = 7              # expectile channels for OutcomePE
 N_VALUES      = 4              # TimescaleRPE: one value channel per unique goal
-LR_W          = 0.0003
-LR_BETA       = 0.003      # β lr 
+LR_W          = 0.00001
+LR_BETA       = 10  # β lr 
 GAMMA_RPE     = 0.95
 GAMMA_APE     = 0.50           # shorter horizon for action-frequency prediction
 SOFTMAX_TEMP  = 0.5
-EPS_PER_BLOCK = 30
+EPS_PER_BLOCK = 50
 N_BLOCKS      = 36
 MAX_STEPS     = 60
-CKPT_INTERVAL = 10            # save maps every N episodes
+CKPT_INTERVAL = 25            # save maps every N episodes
 
 # Goal schedule: 4 inner corners, visited twice
 GOALS = [
@@ -74,16 +74,9 @@ GOALS = [
     (1, 1), (5, 5), (1, 5), (5, 1),
     (1, 1), (5, 5), (1, 5), (5, 1),
     (1, 1), (5, 5), (1, 5), (5, 1),
-    (1, 1), (5, 5), (1, 5), (5, 1),
- 
-  
-
-
-
-
-
-    
+    (1, 1), (5, 5), (1, 5), (5, 1),    
 ]
+
 assert len(GOALS) == N_BLOCKS
 
 ACTION_DELTAS = np.array([[-1, 0], [1, 0], [0, 1], [0, -1]])  # N S E W
@@ -415,7 +408,7 @@ agents = {
     'VectorRPE':   VectorRPEAgent(N_FEATURES,  lr=LR_W,   gamma=GAMMA_RPE),
     'TimescaleRPE':TimescalePEAgent(N_FEATURES, N_VALUES, lr=LR_W, gamma=GAMMA_RPE,
                                     lr_beta=LR_BETA, normalize_betas=True,
-                                    weight_noise=0.1,beta_noise=0.1),
+                                    weight_noise=0.01,beta_noise=0.01),
 }
 
 # APE: nav agent + 4 directional observers
@@ -441,6 +434,7 @@ store = {name: {
 # Extra per-model stores
 store['OutcomePE']['chan_val_maps']  = np.zeros((N_CKPTS, N_OUT_CH, H, W))
 store['TimescaleRPE']['beta_history']  = np.zeros((N_CKPTS, N_VALUES))  # β_i per channel over time
+store['TimescaleRPE']['delta_beta_history'] = np.zeros((N_CKPTS, N_VALUES))  # ∂β_i per channel over time
 store['TimescaleRPE']['chan_val_maps'] = np.zeros((N_CKPTS, N_VALUES, H, W))  # V_i(s) per channel
 store['VectorAPE']['ape_da_maps']   = np.zeros((N_CKPTS, 4, H, W))
 store['VectorAPE']['nav_val_maps']  = np.zeros((N_CKPTS, H, W))
@@ -475,6 +469,8 @@ def save_checkpoint(ep_idx, goal):
 
     store['OutcomePE']['chan_val_maps'][ckpt_idx]  = channel_val_maps(agents['OutcomePE'])
     store['TimescaleRPE']['beta_history'][ckpt_idx]  = beta_vec(agents['TimescaleRPE'])
+    store['TimescaleRPE']['delta_beta_history'][ckpt_idx] = getattr(
+    agents['TimescaleRPE'], 'delta_beta', np.zeros(N_VALUES))
     store['TimescaleRPE']['chan_val_maps'][ckpt_idx] = chan_val_maps_timescale(agents['TimescaleRPE'])
 
     # ── APE ──

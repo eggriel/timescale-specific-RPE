@@ -67,7 +67,7 @@ import numpy as np
 
 
 class TimescalePEAgent:
-    def __init__(self, n_features, n_values, lr, gamma,
+    def __init__(self, n_features, n_values, lr, gamma, delta_beta=None,
                  betas=None, lr_beta=None,
                  beta_min=1e-3, normalize_betas=True, weight_noise=0.01, beta_noise=0.1):
         """
@@ -171,6 +171,8 @@ class TimescalePEAgent:
         """
         N             = self.n_values
         reward_term   = reward / (self.betas * N)                         # (N,)
+        reward_term  = reward / np.sum(self.betas)                        # (N,)
+
         temporal_diff = self.weights @ (self.gamma * succ_vec - state_vec) # (N,)
         return reward_term + temporal_diff
 
@@ -211,16 +213,23 @@ class TimescalePEAgent:
 
         # 2. Per-channel values with OLD W
         V_old = self.weights @ state_vec   # (N,)
-
+        V_new = self.weights @ succ_vec       # (N,)
         # 3. Slow W update: W += α · δ_feat[:,None] · φ[None,:]
         self.weights += self.alpha * np.outer(delta_feat, state_vec)
+        # self.weights += self.alpha * self.betas[:, None] * np.outer(delta_feat, state_vec)
 
         # 4. Fast β update: β += α_β · δ_total · V_old
         if self.alpha_beta != 0.0:
-            eps = 1e-8  # avoid division by zero
-            lambda_reg = 0.7
-            penalty = lambda_reg * 0.5  * np.sign(self.betas) / np.sqrt(np.abs(self.betas) + eps)
-            self.betas += self.alpha_beta * (delta_total * V_old - penalty)
+            lambda_reg = 0.1
+            penalty = lambda_reg * 0.5  * np.sign(self.betas) / np.sqrt(np.abs(self.betas) + 1e-8)
+            penalty = 0
+            self.delta_beta = delta_total * V_old - penalty
+            self.betas += self.alpha_beta * self.delta_beta
+            # delta_beta = delta_total * (V_old - self.gamma * V_new) - penalty
+            # delta_beta = delta_beta - np.sum(delta_beta)/self.n_values 
+            # self.betas += self.alpha_beta * (delta_total * (V_old -reward /np.sum(self.betas) - self.gamma * V_new ) - penalty) +0.01
+            
+
             np.clip(self.betas, self.beta_min, None, out=self.betas)
             if self.normalize_betas:
                 self.betas *= self.n_values / self.betas.sum()
